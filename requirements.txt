@@ -5,3 +5,4 @@ numpy
 plotly
 statsmodels
 arch
+matplotlib
