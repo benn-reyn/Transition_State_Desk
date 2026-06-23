@@ -120,8 +120,8 @@ else:
 # ----------------------------------------------------------------------
 col_logo, col_meta = st.columns([3, 1])
 with col_logo:
-    st.title("Macro Regime & Volatility Terminal")
-    st.caption("Markov-Switching Intercept Autoregressive Heteroskedastic VAR (MSIAH-VAR) • Joint Regime GARCH Engine")
+    st.title("Regime & Volatility Terminal")
+    st.caption("Markov-Switching VAR (MSIAH-VAR) & Joint Regime GARCH")
 
 # Top Level KPI Row
 kpi1, kpi2, kpi3 = st.columns(3)
