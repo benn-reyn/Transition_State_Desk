@@ -87,7 +87,7 @@ st.markdown("""
 # ----------------------------------------------------------------------
 STATE_FILE = "model_state.pkl"
 
-@st.cache_resource(show_spinner=False)
+#@st.cache_resource(show_spinner=False)
 def load_terminal_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "rb") as f:
