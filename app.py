@@ -1,283 +1,393 @@
-import datetime
-from dynamic_Markov import RegimeAnalyzer, CrossAssetAnalytics
+import streamlit as st
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import streamlit as st
-from statsmodels.tsa.stattools import coint
+from plotly.subplots import make_subplots
+import pickle
+import os
+from statsmodels.tsa.stattools import acf
+from msvar_model import MSIAHVAR
+from msgarch_model import WeightedGARCH
 
-st.set_page_config(page_title="Regime Analysis", layout="wide")
+# ----------------------------------------------------------------------
+# Page Configuration & Modern Slate UI Styling
+# ----------------------------------------------------------------------
+st.set_page_config(page_title="Regime Risk Terminal", layout="wide")
 
-@st.cache_resource(ttl=3600, show_spinner=False)
-def execute_cached_estimation(ticker: str, start: str, end: str, k_regimes: int) -> RegimeAnalyzer:
-    analyzer = RegimeAnalyzer(ticker=ticker, start=start, end=end, k_regimes=k_regimes)
-    analyzer.fit_model()
-    return analyzer
+st.markdown("""
+<style>
+    /* Global Overrides */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght=400;500;600;700&display=swap');
+    html, body, [data-testid="stAppViewContainer"] {
+        background-color: #0B0E14;
+        color: #94A3B8;
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    }
+    
+    /* Headers & Text */
+    h1, h2, h3, h4, [data-testid="stMarkdownContainer"] h3 {
+        color: #F8FAFC !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Clean Modern Grid Card */
+    .terminal-card {
+        background: #111622;
+        border: 1px solid #1E293B;
+        border-radius: 8px;
+        padding: 1.25rem;
+        margin-bottom: 1rem;
+    }
+    
+    .metric-title {
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #64748B;
+        font-weight: 600;
+        margin-bottom: 0.5rem;
+    }
+    
+    .metric-value {
+        font-size: 2.25rem;
+        font-weight: 700;
+        line-height: 1;
+        color: #F8FAFC;
+    }
+    
+    .metric-status {
+        font-size: 0.8rem;
+        margin-top: 0.5rem;
+        font-weight: 500;
+    }
+    
+    /* Custom Navigation Tabs Adjustment */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        background-color: transparent;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background-color: #111622;
+        border: 1px solid #1E293B;
+        border-radius: 6px 6px 0 0;
+        padding: 8px 16px;
+        color: #94A3B8;
+        font-weight: 500;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #1E293B !important;
+        color: #F8FAFC !important;
+        border-bottom: 2px solid #38BDF8 !important;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-st.title("Regime Analysis")
-st.markdown("---")
+# ----------------------------------------------------------------------
+# Core Data State Engine
+# ----------------------------------------------------------------------
+STATE_FILE = "model_state.pkl"
 
-st.sidebar.markdown("### Navigation")
-workspace = st.sidebar.selectbox("View", options=["1. Allocation", "2. Diagnostics"])
-st.sidebar.markdown("### Inputs")
+@st.cache_resource(show_spinner=False)
+def load_terminal_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "rb") as f:
+            state = pickle.load(f)
+        return state["msvar"], state["garch_models"], state["residuals"], state["data"]
+    return None, None, None, None
 
-selected_tickers = st.sidebar.multiselect(
-    "Assets",
-    options=["BTC-USD", "GLD", "SLV", "SPY", "QQQ", "^TNX", "^VIX"],
-    default=["BTC-USD", "GLD", "SPY"]
-)
+msvar, garch_models, residuals, data = load_terminal_state()
 
-k_selection = st.sidebar.slider("Regimes (K)", min_value=2, max_value=3, value=2)
-start_date = st.sidebar.date_input("Start Date", datetime.date(2025, 1, 1))
-end_date = st.sidebar.date_input("End Date", datetime.date(2026, 6, 14))
+if msvar is None:
+    st.error("Terminal state payload missing. Please run 'update_models.py' to generate parameters.")
+    st.stop()
 
-fitted_analyzers = {}
+# Cache state attributes locally
+xi_now = msvar.filtered_probs[-1]
+pred_tomorrow = msvar.P.T @ xi_now
+prob_bear_tomorrow = pred_tomorrow[1]
+prob_bear_now = xi_now[1]
 
-if len(selected_tickers) < 1:
-    st.info("Select assets to begin.")
+# Dynamic UI Variant Parameters
+if prob_bear_tomorrow < 0.35:
+    regime_color, regime_bg, regime_label = "#10B981", "rgba(16,185,129,0.15)", "Expansionary / Calm"
+elif prob_bear_tomorrow < 0.65:
+    regime_color, regime_bg, regime_label = "#F59E0B", "rgba(245,158,11,0.15)", "Regime Transition / Indeterminate"
 else:
-    for ticker in selected_tickers:
-        try:
-            analyzer_obj = execute_cached_estimation(
-                ticker=ticker, start=start_date.strftime("%Y-%m-%d"),
-                end=end_date.strftime("%Y-%m-%d"), k_regimes=k_selection
-            )
-            fitted_analyzers[ticker] = analyzer_obj
-            if analyzer_obj.ms_garch_cascade:
-                st.sidebar.info(f"{ticker}: Zero-Mean GARCH(1,1) active.")
-        except Exception as e:
-            st.sidebar.warning(f"Error loading {ticker}: {str(e)}")
+    regime_color, regime_bg, regime_label = "#EF4444", "rgba(239,68,68,0.15)", "Contractionary / Bear Market"
 
-pipeline_valid = len(fitted_analyzers) > 0
+# ----------------------------------------------------------------------
+# Main Dashboard Interface Header
+# ----------------------------------------------------------------------
+col_logo, col_meta = st.columns([3, 1])
+with col_logo:
+    st.title("Macro Regime & Volatility Terminal")
+    st.caption("Markov-Switching Intercept Autoregressive Heteroskedastic VAR (MSIAH-VAR) • Joint Regime GARCH Engine")
 
-# ---------------------------------------------------------
-# VIEWPORT 1: ALLOCATION
-# ---------------------------------------------------------
-if workspace == "1. Allocation" and pipeline_valid:
-    st.subheader("Forward Allocation")
+# Top Level KPI Row
+kpi1, kpi2, kpi3 = st.columns(3)
+with kpi1:
+    st.markdown(f"""
+    <div class="terminal-card" style="border-left: 4px solid {regime_color};">
+        <div class="metric-title">Forecasted Bear Probability (Tomorrow)</div>
+        <div class="metric-value" style="color: {regime_color};">{prob_bear_tomorrow*100:.1f}%</div>
+        <div class="metric-status" style="color: {regime_color};">● Current Outlook: {regime_label}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with kpi2:
+    dur_bear = 1 / (1 - msvar.P[1,1]) if msvar.P[1,1] < 1 else np.inf
+    st.markdown(f"""
+    <div class="terminal-card">
+        <div class="metric-title">Expected Regime Durations</div>
+        <div class="metric-value">{dur_bear:.1f} <span style="font-size:1.25rem; color:#64748B;">Days</span></div>
+        <div class="metric-status" style="color: #64748B;">Calm Regime Expected Base: {1/(1-msvar.P[0,0]):.1f} Days</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with kpi3:
+    vol_forecasts = {}
+    for name in data.columns:
+        g = garch_models[name]
+        e_last = residuals[name][-1]
+        h_last = {0: g.h[0][-1], 1: g.h[1][-1]}
+        vol_forecasts[name] = np.sqrt(g.forecast(e_last, h_last, xi_now)) * 100
     
-    forward_rows = []
-    for ticker, analyzer in fitted_analyzers.items():
-        forecast = analyzer.get_blended_forecast()
-        if not forecast:
-            continue
-        
-        curr_risk = float(analyzer.res.smoothed_marginal_probabilities[analyzer.k_regimes - 1].iloc[-1])
-        f_p1 = float(forecast["forward_probabilities"][-1])
+    top_vol_asset = max(vol_forecasts, key=vol_forecasts.get)
+    st.markdown(f"""
+    <div class="terminal-card">
+        <div class="metric-title">Highest Predicted Next-Day Vol</div>
+        <div class="metric-value">{vol_forecasts[top_vol_asset]:.2f}%</div>
+        <div class="metric-status" style="color: #38BDF8;">Asset Identifier: {top_vol_asset}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
-        forward_rows.append({
-            "Asset": ticker,
-            "Model": "MS + GARCH(1,1)" if analyzer.ms_garch_cascade else "Markov",
-            "Current Vol Prob": curr_risk,
-            "Next Day Vol Prob": f_p1,
-            "Blended Daily Vol": float(forecast['blended_vol_daily']),
-            "Blended Annual Vol": float(forecast['blended_vol_annualized'])
+# ----------------------------------------------------------------------
+# Tabbed Workspace Architecture
+# ----------------------------------------------------------------------
+tab_monitor, tab_transmission, tab_audit = st.tabs([
+    "Regime & Volatility Monitor", 
+    "Transmission & Impulse Responses", 
+    "Model Parameterization & Audits"
+])
+
+# ======================================================================
+# TAB 1: REGIME & VOLATILITY MONITOR
+# ======================================================================
+with tab_monitor:
+    st.markdown("### Regime‑Conditional Variance")
+    
+    col_sel, col_tbl = st.columns([3, 2])
+    with col_sel:
+        asset_variance = st.selectbox("Isolate Conditional Volatility Target:", data.columns, label_visibility="collapsed")
+    
+    garch_asset = garch_models[asset_variance]
+    
+    # Extract raw tracks and latent Markov probabilities
+    p_calm = msvar.smoothed_probs[:, 0]
+    p_bear = msvar.smoothed_probs[:, 1]
+    h_calm = garch_asset.h[0]
+    h_bear = garch_asset.h[1]
+    
+    # Blend the tracks mathematically to match system state reality
+    blended_daily_vol = np.sqrt(p_calm * h_calm + p_bear * h_bear) * 100
+    dates = data.index[1:]
+    
+    fig_var = go.Figure()
+    max_y = float(blended_daily_vol.max()) * 1.15
+    
+    # Background panel overlay: Subtle Blue for Calm Regime Dominance
+    fig_var.add_trace(go.Scatter(
+        x=dates, y=np.where(p_calm >= 0.5, max_y, 0),
+        fill='tozeroy', fillcolor='rgba(14, 165, 233, 0.02)',
+        line=dict(width=0), name='Calm Regime Territory', hoverinfo='skip', showlegend=False
+    ))
+    
+    # Background panel overlay: Faint Crimson Red for Bear Regime Dominance
+    fig_var.add_trace(go.Scatter(
+        x=dates, y=np.where(p_bear > 0.5, max_y, 0),
+        fill='tozeroy', fillcolor='rgba(239, 68, 68, 0.08)',
+        line=dict(width=0), name='Panic Regime Territory', hoverinfo='skip', showlegend=False
+    ))
+    
+    # Base Volatility Trace Line: Understated Clean Electric Blue
+    fig_var.add_trace(go.Scatter(
+        x=dates, y=blended_daily_vol,
+        mode='lines', name='Calm Mode Vol',
+        line=dict(color='#0EA5E9', width=1.5)
+    ))
+    
+    # Foreground Highlight Overlay: Warning Red (Masked to show only during active Bear cycles)
+    bear_line_mask = np.where(p_bear >= 0.5, blended_daily_vol, np.nan)
+    fig_var.add_trace(go.Scatter(
+        x=dates, y=bear_line_mask,
+        mode='lines', name='Bear Mode Vol (Active Risk)',
+        line=dict(color='#EF4444', width=2.0),
+        connectgaps=False
+    ))
+    
+    fig_var.update_layout(
+        height=380, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', 
+        plot_bgcolor='rgba(0,0,0,0)', showlegend=True,
+        margin=dict(l=10, r=10, t=10, b=10), hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    fig_var.update_xaxes(showgrid=True, gridcolor='#1E293B', zeroline=False)
+    fig_var.update_yaxes(showgrid=True, gridcolor='#1E293B', title_text="Daily Volatility (%)", range=[0, max_y])
+    
+    st.plotly_chart(fig_var, use_container_width=True, config={'displayModeBar': False})
+    
+    with col_tbl:
+        st.markdown("<div style='margin-top:-45px;'></div>", unsafe_allow_html=True)
+        vol_summary_df = pd.DataFrame({
+            "Systemic Asset Base": list(vol_forecasts.keys()),
+            "Next-Day Blended Vol Forecast": [f"{v:.3f}%" for v in vol_forecasts.values()]
         })
+        st.dataframe(vol_summary_df, hide_index=True, use_container_width=True)
 
-    forward_df = pd.DataFrame(forward_rows)
-    display_df = forward_df.copy()
-    display_df["Current Vol Prob"] = display_df["Current Vol Prob"].map(lambda x: f"{x:.4f}")
-    display_df["Next Day Vol Prob"] = display_df["Next Day Vol Prob"].map(lambda x: f"{x:.4f}")
-    display_df["Blended Daily Vol"] = display_df["Blended Daily Vol"].map(lambda x: f"{x:.5f}")
-    display_df["Blended Annual Vol"] = display_df["Blended Annual Vol"].map(lambda x: f"{x:.2f}%")
-
-    col_table, col_exp = st.columns([5, 3])
-    with col_table:
-        st.dataframe(display_df.sort_values(by="Next Day Vol Prob", ascending=False), width="stretch", hide_index=True)
-    with col_exp:
-        st.info("Out-of-sample filtered probabilities are used for residual testing. Assets exhibiting autocorrelation trigger a Zero-Mean GARCH(1,1) overlay.")
-
-    st.markdown("---")
-    st.markdown("##### Impulse Response")
-    irf_cols = st.columns(len(fitted_analyzers))
-    for idx, (ticker, analyzer) in enumerate(fitted_analyzers.items()):
-        with irf_cols[idx]:
-            st.plotly_chart(analyzer.generate_contagion_plot(), use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("##### Efficient Frontier")
-    if len(fitted_analyzers) >= 2:
-        col_ef_chart, col_ef_metrics = st.columns([5, 3])
-        active_keys = list(fitted_analyzers.keys())
-        with col_ef_chart:
-            try:
-                returns_data = pd.DataFrame({t: fitted_analyzers[t].data for t in active_keys}).dropna()
-                
-                dynamic_span = CrossAssetAnalytics.get_regime_ewma_span(fitted_analyzers)
-                regime_covariance_matrix = returns_data.ewm(span=dynamic_span).cov().iloc[-len(active_keys):].values
-                
-                asset_means = np.array([fitted_analyzers[t].get_blended_forecast()["blended_mean_daily"] for t in active_keys])
-                asset_vols = np.array([fitted_analyzers[t].get_blended_forecast()["blended_vol_daily"] for t in active_keys])
-                
-                num_simulations = 1500
-                num_assets = len(active_keys)
-                sim_vols = np.zeros(num_simulations)
-                sim_returns = np.zeros(num_simulations)
-                sim_sharpe = np.zeros(num_simulations)
-                sim_weights = np.zeros((num_simulations, num_assets))
-                
-                for i in range(num_simulations):
-                    weights = np.random.random(num_assets)
-                    weights /= np.sum(weights)
-                    sim_weights[i, :] = weights
-                    
-                    p_ret = np.sum(weights * asset_means) * 252
-                    p_vol = np.sqrt(weights.T @ regime_covariance_matrix @ weights) * np.sqrt(252)
-                    sim_returns[i] = p_ret * 100
-                    sim_vols[i] = p_vol * 100
-                    
-                    sim_sharpe[i] = p_ret / p_vol if p_vol > 0 else 0
-                
-                ef_fig = go.Figure()
-                ef_fig.add_trace(go.Scatter(
-                    x=sim_vols, y=sim_returns, mode='markers',
-                    marker=dict(size=5, color=sim_sharpe, colorscale='Blues', showscale=True, colorbar=dict(title='Sharpe')),
-                    name='Simulated Portfolios'
-                ))
-                
-                for ticker in active_keys:
-                    f_cast = fitted_analyzers[ticker].get_blended_forecast()
-                    ef_fig.add_trace(go.Scatter(
-                        x=[f_cast["blended_vol_annualized"]], y=[f_cast["blended_mean_daily"] * 252 * 100],
-                        mode='markers+text', text=[ticker], textposition="top center",
-                        marker=dict(size=10, color='#DC2626', symbol='diamond'), name=ticker
-                    ))
-                    
-                ef_fig.update_layout(
-                    template="plotly_white", height=380,
-                    xaxis_title="Annualized Volatility (%)", yaxis_title="Annualized Expected Return (%)",
-                    margin=dict(l=40, r=20, t=20, b=40), showlegend=False,
-                    font=dict(family="system-ui, -apple-system, sans-serif")
-                )
-                st.plotly_chart(ef_fig, use_container_width=True)
-            except Exception as ef_error:
-                st.caption(f"Error calculating efficient frontier: {str(ef_error)}")
-        with col_ef_metrics:
-            st.markdown("**Target Weights**")
-            try:
-                st.caption(f"Covariance Matrix: EWMA (Span: {dynamic_span} days).")
-                best_sharpe_idx = np.argmax(sim_sharpe)
-                min_vol_idx = np.argmin(sim_vols)
-                
-                msr_allocations = sim_weights[best_sharpe_idx]
-                mvp_allocations = sim_weights[min_vol_idx]
-                
-                allocation_records = []
-                for idx, t in enumerate(active_keys):
-                    allocation_records.append({
-                        "Asset": t,
-                        "Max Sharpe": f"{msr_allocations[idx] * 100:.1f}%",
-                        "Min Variance": f"{mvp_allocations[idx] * 100:.1f}%"
-                    })
-                st.dataframe(pd.DataFrame(allocation_records), width="stretch", hide_index=True)
-            except Exception:
-                st.caption("Allocation metrics unavailable.")
-
-    st.markdown("---")
-    st.markdown("##### Cross-Asset Correlation")
-    col_sync, col_policy = st.columns([4, 4])
+# ======================================================================
+# TAB 2: TRANSMISSION & IMPULSE RESPONSES
+# ======================================================================
+with tab_transmission:
+    st.markdown("### Ergodicity Validation & Structural Tail Risk")
+    st.markdown(
+        "Linear structural VARs assume steady-state ergodicity and Gaussian normal errors. "
+        "When **Excess Kurtosis ($>0$)** is present, distributions violate normal parameters. This diagnostic validates the mathematical requirement of utilizing a path-dependent Markov-Switching design."
+    )
     
-    with col_sync:
-        sync_matrix = CrossAssetAnalytics.compute_regime_sync(fitted_analyzers)
-        if not sync_matrix.empty:
-            st.dataframe(sync_matrix.style.background_gradient(cmap="Blues", axis=None), width="stretch")
-        else:
-            st.caption("Not enough data to calculate correlation.")
-
-    with col_policy:
-        st.markdown("**Status**")
-        high_correlation = False
-        if not sync_matrix.empty and sync_matrix.shape[0] > 1:
-            upper_vals = sync_matrix.values[np.triu_indices_from(sync_matrix.values, k=1)]
-            if np.any(upper_vals > 0.70):
-                high_correlation = True
-
-        if high_correlation:
-            st.warning("High correlation in tail risk states detected. Scale down sizing.")
-        else:
-            st.success("Assets show independent variance tracking.")
-            
-        mean_forward_risk = np.mean([x["Next Day Vol Prob"] for x in forward_rows]) if forward_rows else 0.0
-        st.metric("Average Forward Volatility Prob", f"{mean_forward_risk:.4f}")
+    excess_kurtosis = data.kurtosis()
+    skewness = data.skew()
+    kurt_df = pd.DataFrame({
+        "Asset Matrix": data.columns,
+        "Excess Kurtosis": excess_kurtosis.values,
+        "Skewness Coefficient": skewness.values
+    })
+    
+    col_k_chart, col_k_metrics = st.columns([3, 2])
+    with col_k_chart:
+        fig_kurt = go.Figure()
+        fig_kurt.add_trace(go.Bar(
+            x=kurt_df["Asset Matrix"], y=kurt_df["Excess Kurtosis"],
+            marker_color=['#EF4444' if k > 1.2 else '#38BDF8' for k in kurt_df["Excess Kurtosis"]],
+            text=kurt_df["Excess Kurtosis"].round(2), textposition='auto',
+            textfont=dict(color='#F8FAFC')
+        ))
+        fig_kurt.add_shape(type="line", x0=-0.5, x1=len(data.columns)-0.5, y0=0, y1=0,
+                           line=dict(color="#64748B", width=1.5, dash="dash"))
+        fig_kurt.update_layout(
+            template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            yaxis=dict(title="Value", showgrid=True, gridcolor='#1E293B'),
+            xaxis=dict(showgrid=False), margin=dict(l=10, r=10, t=10, b=10), height=240
+        )
+        st.plotly_chart(fig_kurt, use_container_width=True, config={'displayModeBar': False})
+        
+    with col_k_metrics:
+        st.dataframe(kurt_df, hide_index=True, use_container_width=True)
+        st.caption("*Note: Red markers represent significant leptokurtosis, highlighting high-probability tail risks that cause classic linear IRF bounds to collapse under standard unconditioned expectations.*")
 
     st.markdown("---")
-    st.markdown("##### Pairs Trading")
-    if len(fitted_analyzers) >= 2:
-        col_coint_grid, col_coint_advice = st.columns([5, 3])
-        with col_coint_grid:
-            coint_records = []
-            active_keys = list(fitted_analyzers.keys())
-            for i, tA in enumerate(active_keys):
-                for j, tB in enumerate(active_keys):
-                    if i < j:
-                        try:
-                            series_A = np.log(fitted_analyzers[tA].raw_prices)
-                            series_B = np.log(fitted_analyzers[tB].raw_prices)
-                            combined = pd.concat([series_A, series_B], axis=1).dropna()
-                            
-                            _, p_val, _ = coint(combined.iloc[:, 0], combined.iloc[:, 1])
-                            
-                            f_castA = fitted_analyzers[tA].get_blended_forecast()
-                            f_castB = fitted_analyzers[tB].get_blended_forecast()
-                            
-                            p1_A = float(f_castA["forward_probabilities"][-1])
-                            p1_B = float(f_castB["forward_probabilities"][-1])
-                            
-                            coint_records.append({
-                                "Pair": f"{tA} / {tB}",
-                                "Models": f"{'MS+GARCH' if fitted_analyzers[tA].ms_garch_cascade else 'MS'} / {'MS+GARCH' if fitted_analyzers[tB].ms_garch_cascade else 'MS'}",
-                                "Coint P-Value": f"{p_val:.4f}",
-                                "Status": "Stationary" if p_val < 0.05 else "Non-Stationary",
-                                "Max Risk Prob": max(p1_A, p1_B)
-                            })
-                        except Exception:
-                            pass
-            coint_df = pd.DataFrame(coint_records)
-            if not coint_df.empty:
-                st.dataframe(coint_df, width="stretch", hide_index=True)
-            else:
-                st.caption("No integrated vectors available.")
-
-        with col_coint_advice:
-            if not coint_df.empty:
-                valid_pairs = coint_df[coint_df["Status"] == "Stationary"]
-                if valid_pairs.empty:
-                    st.info("No cointegrated pairs found.")
-                else:
-                    highest_pair_risk = valid_pairs["Max Risk Prob"].max()
-                    if highest_pair_risk >= 0.65:
-                        st.warning("Pair is cointegrated, but forward risk is too high to trade.")
-                    else:
-                        st.success("Pair is cointegrated and forward risk is within bounds.")
+    
+    st.markdown("### Generalised Macro Transmission Vectors")
+    irf_cols = st.columns([2, 2, 1])
+    with irf_cols[0]:
+        shock_var = st.selectbox("Initiate Shock Origin:", data.columns, key="term_shk")
+    with irf_cols[1]:
+        shock_size = st.radio("Impulse Boundary Weighting:", ["+1% Shock", "+1 Std. Dev. Shock"], horizontal=True, key="term_sz")
+        
+    idx = list(data.columns).index(shock_var)
+    shock_vec = np.zeros(len(data.columns))
+    
+    if "+1%" in shock_size:
+        shock_vec[idx] = 0.01
     else:
-        st.caption("Select 2 or more assets to calculate pairs.")
+        erg = msvar._ergodic_probs(msvar.P)
+        uncond_var = np.zeros(len(data.columns))
+        for k in range(msvar.K):
+            uncond_var += erg[k] * np.diag(msvar.covs[k])
+        shock_vec[idx] = np.sqrt(uncond_var[idx])
 
-# ---------------------------------------------------------
-# VIEWPORT 2: DIAGNOSTICS
-# ---------------------------------------------------------
-elif workspace == "2. Diagnostics" and pipeline_valid:
-    st.subheader("Model Diagnostics")
+    # Universal Un-Nested Computation Execution Block
+    try:
+        mean_irf, lower_irf, upper_irf = msvar.simulate_irf(shock_vec, horizon=20, n_sim=500)
+        use_simulation = True
+    except Exception:
+        mean_irf = msvar.impulse_response(shock_vec, horizon=20)
+        use_simulation = False
+
+    cols_plot = data.columns
+    n_cols = len(cols_plot)
+    fig_irf = make_subplots(rows=1, cols=n_cols, subplot_titles=list(cols_plot))
     
-    for ticker, analyzer in fitted_analyzers.items():
-        with st.expander(f"Model Profile: {ticker}", expanded=True):
-            tab_hist, tab_diag = st.tabs(["Historical Regimes", "Residual Diagnostics"])
-            
-            with tab_hist:
-                col_chart, col_metrics = st.columns([5, 3])
-                with col_chart:
-                    st.plotly_chart(analyzer.generate_regime_plot(), use_container_width=True)
-                with col_metrics:
-                    st.markdown("##### Regime Parameters")
-                    st.dataframe(analyzer.get_regime_statistics(), width="stretch", hide_index=True)
+    for i, col_name in enumerate(cols_plot):
+        h = np.arange(21)
+        fig_irf.add_trace(go.Scatter(
+            x=h, y=mean_irf[:, i]*100, mode='lines', name=col_name,
+            line=dict(color='#38BDF8', width=2)
+        ), row=1, col=i+1)
+        
+        if use_simulation:
+            fig_irf.add_trace(go.Scatter(
+                x=np.concatenate([h, h[::-1]]),
+                # Fixed Python Operator Precedence Bug below using proper tuple wrapping
+                y=np.concatenate([lower_irf[:, i]*100, (upper_irf[:, i]*100)[::-1]]),
+                fill='toself', fillcolor='rgba(56,189,248,0.12)',
+                line=dict(color='rgba(255,255,255,0)'), showlegend=False
+            ), row=1, col=i+1)
+        fig_irf.add_shape(type="line", x0=0, x1=20, y0=0, y1=0, line=dict(color="#475569", width=1), row=1, col=i+1)
 
-            with tab_diag:
-                st.markdown("##### Standardized Residuals")
-                st.caption("White-noise tests run using out-of-sample filtered probabilities.")
-                diag_plots = analyzer.generate_individual_diagnostic_plots()
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.plotly_chart(diag_plots[0], use_container_width=True)
-                with col2:
-                    st.plotly_chart(diag_plots[1], use_container_width=True)
-                with col3:
-                    st.plotly_chart(diag_plots[2], use_container_width=True)
+    fig_irf.update_layout(
+        height=280, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', 
+        plot_bgcolor='rgba(0,0,0,0)', showlegend=False,
+        margin=dict(l=10, r=10, t=30, b=10), hovermode="x unified"
+    )
+    fig_irf.update_xaxes(showgrid=True, gridcolor='#1E293B')
+    fig_irf.update_yaxes(showgrid=True, gridcolor='#1E293B')
+    
+    st.plotly_chart(fig_irf, use_container_width=True, config={'displayModeBar': False})
+    st.caption("Showing full system transmission tracing over a 20-day path baseline horizon.")
+
+# ======================================================================
+# TAB 3: MODEL PARAMETERIZATION & AUDITS
+# ======================================================================
+with tab_audit:
+    st.markdown("### Regime Persistence and Decay Dynamics")
+    
+    col_p1, col_p2 = st.columns([2, 3])
+    with col_p1:
+        st.markdown("**Transition Matrix Probs ($P$)**")
+        st.dataframe(pd.DataFrame(msvar.P, columns=["To Calm", "To Bear"], index=["From Calm", "From Bear"]).style.format("{:.4f}"), use_container_width=True)
+        
+    with col_p2:
+        st.markdown("**GARCH Architecture Half-Lives**")
+        param_records = []
+        for name in data.columns:
+            g = garch_models[name]
+            for k, lbl in enumerate(["Calm", "Bear"]):
+                omega, alpha, beta = g.params[k]
+                pers = alpha + beta
+                hl = np.log(0.5) / np.log(pers) if pers < 1 else np.inf
+                param_records.append({"Asset": name, "Regime": lbl, "Persistence": pers, "Half-Life (Days)": f"{hl:.1f}" if hl != np.inf else "Infinite"})
+        st.dataframe(pd.DataFrame(param_records), hide_index=True, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("### Residual Orthogonality Check (ACF)")
+    
+    acf_cols = st.columns(len(data.columns))
+    for idx, name in enumerate(data.columns):
+        with acf_cols[idx]:
+            resid = residuals[name]
+            acf_vals, conf_int = acf(resid, nlags=12, alpha=0.05)
+            lower = conf_int[:, 0] - acf_vals
+            upper = conf_int[:, 1] - acf_vals
+            lags = np.arange(len(acf_vals))
+            
+            fig_acf = go.Figure()
+            fig_acf.add_trace(go.Bar(x=lags[1:], y=acf_vals[1:], marker_color='#64748B', showlegend=False))
+            fig_acf.add_trace(go.Scatter(x=lags[1:], y=upper[1:], mode='lines', line=dict(width=0), showlegend=False))
+            fig_acf.add_trace(go.Scatter(x=lags[1:], y=lower[1:], mode='lines', fill='tonexty', fillcolor='rgba(148,163,184,0.1)', line=dict(width=0), showlegend=False))
+            fig_acf.update_layout(
+                title=f"{name} Residuals", template="plotly_dark", 
+                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                margin=dict(l=5, r=5, t=30, b=5), height=180,
+                xaxis=dict(showgrid=False, tickvals=[3, 6, 9, 12]), yaxis=dict(showgrid=True, gridcolor='#1E293B', range=[-0.3, 0.3])
+            )
+            st.plotly_chart(fig_acf, use_container_width=True, config={'displayModeBar': False})
