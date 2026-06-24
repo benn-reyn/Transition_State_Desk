@@ -182,9 +182,9 @@ top_vol_asset = max(vol_forecasts, key=vol_forecasts.get)
 if prob_bear_tm < 0.35:
     regime_color, pill_cls, regime_label = "#34D399", "pill-calm",  "Calm regime"
 elif prob_bear_tm < 0.65:
-    regime_color, pill_cls, regime_label = "#FCD34D", "pill-trans", "Transition / indeterminate"
+    regime_color, pill_cls, regime_label = "#FCD34D", "pill-trans", "Indeterminate regime"
 else:
-    regime_color, pill_cls, regime_label = "#F87171", "pill-bear",  "Bear / contractionary"
+    regime_color, pill_cls, regime_label = "#F87171", "pill-bear",  "Bear regime"
 
 # Plotly base layout
 _LAYOUT = dict(
@@ -201,8 +201,7 @@ _GRID = dict(showgrid=True, gridcolor="#1E293B", zeroline=False)
 # ----------------------------------------------------------------------
 col_title, col_pill = st.columns([5, 1])
 with col_title:
-    st.markdown("## Macro Regime Terminal")
-    st.caption("MSIAH-VAR · Regime-conditional GARCH · Kole & van Dijk (2023) impulse responses · daily via Yahoo Finance & FRED")
+    st.markdown("## Regime Terminal")
 with col_pill:
     st.markdown(f"""
     <div style="display:flex; justify-content:flex-end; padding-top:10px;">
@@ -221,7 +220,7 @@ k1, k2, k3, k4 = st.columns(4)
 with k1:
     st.markdown(f"""
     <div class="kpi-card" style="border-left: 3px solid {regime_color};">
-        <div class="kpi-label">Bear prob · tomorrow</div>
+        <div class="kpi-label">Bear prob tomorrow</div>
         <div class="kpi-value" style="color:{regime_color};">{prob_bear_tm*100:.1f}%</div>
         <div class="kpi-sub">Today: {prob_bear_now*100:.1f}% smoothed</div>
     </div>""", unsafe_allow_html=True)
@@ -239,7 +238,7 @@ with k3:
     <div class="kpi-card">
         <div class="kpi-label">Highest next-day vol</div>
         <div class="kpi-value">{vol_forecasts[top_vol_asset]:.2f}%</div>
-        <div class="kpi-sub">{top_vol_asset} · blended forecast</div>
+        <div class="kpi-sub">{top_vol_asset} blended forecast</div>
     </div>""", unsafe_allow_html=True)
 
 with k4:
@@ -315,10 +314,10 @@ with tab_monitor:
     fig_vol.update_yaxes(**_GRID, title_text="Daily vol (%)", range=[0, max_y])
 
     st.plotly_chart(fig_vol, use_container_width=True, config={"displayModeBar": False})
-    st.markdown('<p class="note-text">Red shading = bear regime dominant (smoothed prob > 50%). Red line = blended vol during bear periods.</p>', unsafe_allow_html=True)
+    st.markdown('<p class="note-text">Red shading = bear regime dominant (kim smoothed prob > 50%)</p>', unsafe_allow_html=True)
 
     st.markdown("<hr>", unsafe_allow_html=True)
-    st.markdown('<div class="eyebrow">Next-day volatility forecasts · all assets</div>', unsafe_allow_html=True)
+    st.markdown('<div class="eyebrow">Next-day volatility forecasts</div>', unsafe_allow_html=True)
 
     vol_df = pd.DataFrame({
         "Asset":            list(vol_forecasts.keys()),
@@ -336,7 +335,7 @@ with tab_transmission:
     st.markdown('<div class="eyebrow">How does a shock to one asset move through the system?</div>', unsafe_allow_html=True)
     st.markdown(
         '<p style="font-size:13px;color:#64748B;margin-bottom:1rem;line-height:1.6;">'
-        'When the ergodicity assumptions hold, these are closed-form solutions — not approximations — '
+        'When the ergodicity assumptions hold, these are in theory closed-form solutions'
         'of how a shock propagates across each asset over a 20-day horizon. '
         'Check the Diagnostics tab to verify assumptions before interpreting.'
         '</p>',
@@ -379,7 +378,7 @@ with tab_transmission:
 
     for i, col_name in enumerate(data.columns):
         y_mid = mean_irf[:, i] * 100
-        h     = np.arange(len(y_mid))  # Bound horizon safely to prevent dimension mismatches
+        h     = np.arange(len(y_mid))
         color = "#38BDF8" if y_mid[-1] >= 0 else "#F87171"
 
         if use_sim:
@@ -456,11 +455,11 @@ with tab_diagnostics:
         overall = mean_ergodic and var_ergodic_calm and var_ergodic_bear
 
         if overall:
-            badge_cls, badge_txt, icon = "erg-pass", "Assumptions hold", "✓"
+            badge_cls, badge_txt = "erg-pass", "Assumptions hold"
         elif mean_ergodic and (var_ergodic_calm or var_ergodic_bear):
-            badge_cls, badge_txt, icon = "erg-warn", "Monitor closely", "!"
+            badge_cls, badge_txt = "erg-warn", "Monitor closely"
         else:
-            badge_cls, badge_txt, icon = "erg-fail", "Assumptions at risk", "✗"
+            badge_cls, badge_txt = "erg-fail", "Assumptions at risk"
 
         erg_records.append({
             "name":       name,
@@ -472,7 +471,6 @@ with tab_diagnostics:
             "var_erg_b":  var_ergodic_bear,
             "badge_cls":  badge_cls,
             "badge_txt":  badge_txt,
-            "icon":       icon,
         })
 
     # Render ergodicity table
@@ -485,13 +483,13 @@ with tab_diagnostics:
             st.markdown(f"""
             <div style="background:#0F1117;border:0.5px solid #1E293B;border-radius:8px;padding:12px 14px;">
                 <div style="font-size:12px;font-weight:500;color:#F1F5F9;margin-bottom:8px;">{rec['name']}</div>
-                <div class="erg-badge {rec['badge_cls']}" style="margin-bottom:10px;">{rec['icon']} {rec['badge_txt']}</div>
+                <div class="erg-badge {rec['badge_cls']}" style="margin-bottom:10px;">{rec['badge_txt']}</div>
                 <div style="font-size:11px;color:#475569;margin-top:4px;">Mean ergodic (ADF)</div>
-                <div style="font-size:12px;color:{mean_color};margin-bottom:4px;">p = {rec['adf_p']:.4f} {"✓" if rec['mean_erg'] else "✗"}</div>
+                <div style="font-size:12px;color:{mean_color};margin-bottom:4px;">p = {rec['adf_p']:.4f}</div>
                 <div style="font-size:11px;color:#475569;">Var persist · calm</div>
-                <div style="font-size:12px;color:{vc_color};margin-bottom:4px;">{rec['pers_calm']:.4f} {"✓" if rec['var_erg_c'] else "✗"}</div>
+                <div style="font-size:12px;color:{vc_color};margin-bottom:4px;">{rec['pers_calm']:.4f}</div>
                 <div style="font-size:11px;color:#475569;">Var persist · bear</div>
-                <div style="font-size:12px;color:{vb_color};">{rec['pers_bear']:.4f} {"✓" if rec['var_erg_b'] else "✗"}</div>
+                <div style="font-size:12px;color:{vb_color};">{rec['pers_bear']:.4f}</div>
             </div>""", unsafe_allow_html=True)
 
     st.markdown("<hr>", unsafe_allow_html=True)
@@ -701,7 +699,7 @@ with tab_diagnostics:
                     "Regime":       lbl,
                     "α + β":        round(pers, 4),
                     "Half-life":    f"{hl:.1f} days" if hl != np.inf else "∞",
-                    "Ergodic":      "✓" if pers < 1 else "✗",
+                    "Ergodic":      "Yes" if pers < 1 else "No",
                 })
         st.dataframe(pd.DataFrame(param_rows), hide_index=True, use_container_width=True)
 
