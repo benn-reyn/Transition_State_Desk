@@ -4,25 +4,28 @@ An analytical dashboard for tracking asset volatility regimes and cross-asset sh
 
 ## System Architecture
 
-___________________________________
+┌─────────────────────────────────┐
 │     Macroeconomic Data Input    │
 │  (Daily Yahoo Finance & FRED)   │
------------------------------------
+└────────────────┬────────────────┘
 │
-___________________________________
+▼
+┌─────────────────────────────────┐
 │      MSIAH-VAR Regime Model     │
-│   (Smooths Calm vs. Bear Prob)  │
------------------------------------
+│   (Smooths Calm vs. Bear Prob)   │
+└────────────────┬────────────────┘
 │
-___________________________________
+▼
+┌─────────────────────────────────┐
 │    Regime-Conditional GARCH     │
 │  (Blended Volatility Forecasts) │
------------------------------------
+└────────────────┬────────────────┘
 │
-__________________________________
+▼
+┌─────────────────────────────────┐
 │  Kole & van Dijk (2023) IRFs    │
 │  (Closed-Form Shock Spillovers) │
------------------------------------
+└─────────────────────────────────┘
 
 ### Core Methodology
 * **Regime Detection:** A hidden Markov model architecture that endogenously segments the state space into distinct regimes (e.g., *Calm* vs. *High-volatility*) without requiring structural break priors.
